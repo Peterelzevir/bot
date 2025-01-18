@@ -10,7 +10,7 @@ const pino = require('pino');
 const logger = pino({ level: 'silent' });
 
 // Telegram Bot Token - Replace with your token
-const TELEGRAM_TOKEN = '7711523807:AAEtufgRVomPgz343abWLEfsVmVaSPB5LLI';
+const TELEGRAM_TOKEN = '7711523807:AAGPVcTnpF8K6k5nHioZt-D8a2hsSLzcv0k';
 
 // Watermark
 const WATERMARK = 'created @hiyaok';
