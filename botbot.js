@@ -13,7 +13,7 @@ const logger = pino({ level: 'silent' });
 const TELEGRAM_TOKEN = '7711523807:AAEtufgRVomPgz343abWLEfsVmVaSPB5LLI';
 
 // Watermark
-const WATERMARK = '@hiyaok';
+const WATERMARK = 'created @hiyaok';
 
 // Initialize Telegram Bot
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
@@ -52,7 +52,7 @@ async function connectToWhatsApp(userId, msg) {
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
-            browser: Browsers.ubuntu('Chrome'),
+            browser: Browsers.ubuntu('Safari'),
             logger: logger,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
@@ -85,7 +85,7 @@ async function connectToWhatsApp(userId, msg) {
                         await bot.editMessageMedia({
                             type: 'photo',
                             media: qrImage,
-                            caption: `📱 Scan this QR code to connect your WhatsApp\nQR code will automatically refresh if expired\n\n${WATERMARK}`
+                            caption: `📱 Scan this QR code to connect your WhatsApp\n\nQR code will automatically refresh if expired\n\n${WATERMARK}`
                         }, {
                             chat_id: msg.chat.id,
                             message_id: session.qrMsg.message_id,
@@ -93,7 +93,7 @@ async function connectToWhatsApp(userId, msg) {
                         }).catch(console.error);
                     } else {
                         const qrMsg = await bot.sendPhoto(msg.chat.id, qrImage, {
-                            caption: `📱 Scan this QR code to connect your WhatsApp\nQR code will automatically refresh if expired\n\n${WATERMARK}`,
+                            caption: `📱 Scan this QR code to connect your WhatsApp\n\nQR code will automatically refresh if expired\n\n${WATERMARK}`,
                             reply_markup: cancelButton
                         }).catch(console.error);
                         if (qrMsg) {
@@ -120,12 +120,12 @@ async function connectToWhatsApp(userId, msg) {
                     // Get user info
                     const userInfo = sock.user;
                     await bot.sendMessage(msg.chat.id, 
-                        `📱 *Connected WhatsApp Account*\n` +
+                        `📱 *Connected WhatsApp Account* ✅\n` +
                         `• Number: ${userInfo.id.split(':')[0]}\n` +
                         `• Name: ${userInfo.name}\n` +
                         `• Device: ${userInfo.platform}\n\n` +
-                        `Use /link to get group invite links\n` +
-                        `Use /logout to disconnect WhatsApp\n\n` +
+                        `Use /link to get group invite links 👀\n` +
+                        `Use /logout to disconnect WhatsApp 💡\n\n` +
                         `${WATERMARK}`,
                         { parse_mode: 'Markdown' }
                     ).catch(console.error);
@@ -227,8 +227,8 @@ bot.onText(/\/link/, async (msg) => {
             fileContent += 'Successfully Retrieved Links:\n\n';
             
             for (const group of successfulGroups) {
-                fileContent += `Group: ${group.name}\n`;
-                fileContent += `Link: ${group.link}\n\n`;
+                fileContent += `Group : ${group.name}\n`;
+                fileContent += `Link : ${group.link}\n\n`;
             }
             
             fileContent += `\n${WATERMARK}`;
@@ -239,7 +239,7 @@ bot.onText(/\/link/, async (msg) => {
             
             const caption = `📊 Results Summary:\n` +
                           `✅ Successfully retrieved: ${successfulGroups.length} groups\n` +
-                          `❌ Failed to retrieve: ${failedGroups.length} groups\n\n` +
+                          `❌ Failed to retrieve : ${failedGroups.length} groups\n\n` +
                           (failedGroups.length > 0 ? 
                               `Failed Groups:\n${failedGroups.map(name => `• ${name}`).join('\n')}\n\n` : '') +
                           WATERMARK;
