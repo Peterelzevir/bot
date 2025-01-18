@@ -52,7 +52,7 @@ async function connectToWhatsApp(userId, msg) {
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
-            browser: Browsers.ubuntu('Safari'),
+            browser: Browsers.botgetlink('Safari'),
             logger: logger,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
