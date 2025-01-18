@@ -206,69 +206,102 @@ bot.onText(/\/link/, async (msg) => {
         let successfulGroups = [];
         let failedGroups = [];
         
-        // Process groups with better error handling
+        // Get own WhatsApp ID
+        const ownerId = session.sock.user.id;
+        
+        // Process groups
         const groupEntries = Object.entries(groups);
         
         for (let i = 0; i < groupEntries.length; i++) {
             const [groupId, groupInfo] = groupEntries[i];
             
-            // Update status message with progress
-            await bot.editMessageText(
-                `🔄 Getting group links... (${i + 1}/${groupEntries.length} groups)\n\n${WATERMARK}`, {
-                chat_id: msg.chat.id,
-                message_id: statusMsg.message_id
-            }).catch(console.error);
+            // Update status message
+            try {
+                await bot.editMessageText(
+                    `🔄 Getting group links... (${i + 1}/${groupEntries.length} groups)\n\n${WATERMARK}`, {
+                    chat_id: msg.chat.id,
+                    message_id: statusMsg.message_id
+                });
+            } catch (err) {
+                console.error('Error updating status:', err);
+            }
             
             try {
-                // Get group invite code directly without admin check
-                const inviteCode = await session.sock.groupInviteCode(groupId);
+                // Check if user is admin
+                const participants = groupInfo.participants || [];
+                const selfParticipant = participants.find(p => p.id === ownerId);
                 
-                if (inviteCode) {
-                    successfulGroups.push({
-                        name: groupInfo.subject,
-                        link: `https://chat.whatsapp.com/${inviteCode}`,
-                        participants: groupInfo.participants?.length || 0
-                    });
+                // Only try to get invite code if we're an admin
+                if (selfParticipant && ['admin', 'superadmin'].includes(selfParticipant.admin)) {
+                    try {
+                        const inviteCode = await session.sock.groupInviteCode(groupId);
+                        
+                        if (inviteCode) {
+                            successfulGroups.push({
+                                name: groupInfo.subject,
+                                link: `https://chat.whatsapp.com/${inviteCode}`,
+                                participants: participants.length,
+                                role: selfParticipant.admin || 'member'
+                            });
+                        }
+                    } catch (inviteError) {
+                        console.error(`Error getting invite code for group ${groupInfo.subject}:`, inviteError);
+                        failedGroups.push({
+                            name: groupInfo.subject,
+                            reason: 'Could not generate invite code',
+                            error: inviteError.message
+                        });
+                    }
                 } else {
+                    // If not admin, add to failed groups
                     failedGroups.push({
                         name: groupInfo.subject,
-                        reason: 'Could not generate invite code'
+                        reason: 'Not an admin in this group',
+                        role: selfParticipant?.admin || 'member'
                     });
                 }
             } catch (err) {
-                console.error(`Error getting invite code for group ${groupInfo.subject}:`, err);
+                console.error(`Error processing group ${groupInfo.subject}:`, err);
                 failedGroups.push({
                     name: groupInfo.subject,
-                    reason: 'Error generating invite code'
+                    reason: 'Error processing group',
+                    error: err.message
                 });
             }
             
-            // Add small delay between requests
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Add delay between requests
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
-        // Sort groups alphabetically
+        // Sort groups
         successfulGroups.sort((a, b) => a.name.localeCompare(b.name));
 
         // Create report
         let fileContent = '📋 WhatsApp Group Links Report\n\n';
-        fileContent += '✅ Successfully Retrieved Links:\n\n';
         
-        for (const group of successfulGroups) {
-            fileContent += `Group Name: ${group.name}\n`;
-            fileContent += `Members: ${group.participants} participants\n`;
-            fileContent += `Link: ${group.link}\n\n`;
+        if (successfulGroups.length > 0) {
+            fileContent += '✅ Successfully Retrieved Links:\n\n';
+            for (const group of successfulGroups) {
+                fileContent += `Group Name: ${group.name}\n`;
+                fileContent += `Members: ${group.participants} participants\n`;
+                fileContent += `Your Role: ${group.role}\n`;
+                fileContent += `Link: ${group.link}\n\n`;
+            }
         }
         
         if (failedGroups.length > 0) {
             fileContent += '\n❌ Failed Groups:\n\n';
             for (const group of failedGroups) {
                 fileContent += `Group Name: ${group.name}\n`;
-                fileContent += `Reason: ${group.reason}\n\n`;
+                fileContent += `Reason: ${group.reason}\n`;
+                if (group.role) fileContent += `Your Role: ${group.role}\n`;
+                if (group.error) fileContent += `Error: ${group.error}\n`;
+                fileContent += '\n';
             }
         }
         
-        fileContent += `\nTotal Groups: ${groupEntries.length}\n`;
+        fileContent += `\nSummary:\n`;
+        fileContent += `Total Groups: ${groupEntries.length}\n`;
         fileContent += `Successfully Retrieved: ${successfulGroups.length}\n`;
         fileContent += `Failed: ${failedGroups.length}\n\n`;
         fileContent += WATERMARK;
