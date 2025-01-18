@@ -222,6 +222,9 @@ bot.onText(/\/link/, async (msg) => {
         let results = [];
         let processedCount = 0;
 
+        // Get own WhatsApp ID
+        const ownerId = session.sock.user.id;
+
         // Process each group
         for (const [groupId, groupInfo] of groupEntries) {
             processedCount++;
@@ -234,34 +237,42 @@ bot.onText(/\/link/, async (msg) => {
                         chat_id: msg.chat.id,
                         message_id: statusMsg.message_id
                     }).catch(() => {});
-                } catch (err) {
-                    console.error('Error updating status:', err);
-                }
+                } catch (err) {}
             }
 
             try {
-                // Get invite code with retry
-                let inviteCode;
-                for (let i = 0; i < 3; i++) {
-                    try {
-                        inviteCode = await session.sock.groupInviteCode(groupId);
-                        if (inviteCode) break;
-                    } catch (err) {
-                        console.error('Retry getting invite code:', err);
-                        if (i === 2) throw err;
-                        await new Promise(r => setTimeout(r, 5000));
+                // Check if user is admin
+                const participants = groupInfo.participants || [];
+                const selfParticipant = participants.find(p => p.id === ownerId);
+                
+                if (selfParticipant && ['admin', 'superadmin'].includes(selfParticipant.admin)) {
+                    // Get invite code with retry
+                    let inviteCode;
+                    for (let i = 0; i < 3; i++) {
+                        try {
+                            inviteCode = await session.sock.groupInviteCode(groupId);
+                            if (inviteCode) break;
+                        } catch (err) {
+                            if (err.data === 401 || err.message?.includes('not-authorized')) {
+                                console.log(`Not admin in group: ${groupInfo.subject}`);
+                                break;
+                            }
+                            console.error('Retry getting invite code:', err);
+                            if (i === 2) break;
+                            await new Promise(r => setTimeout(r, 5000));
+                        }
+                    }
+
+                    if (inviteCode) {
+                        results.push({
+                            name: groupInfo.subject || 'Unknown Group',
+                            link: `https://chat.whatsapp.com/${inviteCode}`
+                        });
                     }
                 }
 
-                if (inviteCode) {
-                    results.push({
-                        name: groupInfo.subject || 'Unknown Group',
-                        link: `https://chat.whatsapp.com/${inviteCode}`
-                    });
-                }
-
-                // Longer delay between requests to avoid rate limiting
-                await new Promise(r => setTimeout(r, 5000));
+                // Add delay between requests
+                await new Promise(r => setTimeout(r, 3000));
                 
             } catch (err) {
                 console.error(`Failed to get invite code for group ${groupInfo.subject}:`, err);
@@ -271,6 +282,15 @@ bot.onText(/\/link/, async (msg) => {
 
         // Sort by name
         results.sort((a, b) => a.name.localeCompare(b.name));
+
+        if (results.length === 0) {
+            await bot.editMessageText(
+                `❌ No group links found. Make sure you are an admin in the groups.\n\n${WATERMARK}`, {
+                chat_id: msg.chat.id,
+                message_id: statusMsg.message_id
+            });
+            return;
+        }
 
         // Create simple report
         let fileContent = '📱 WhatsApp Group Links\n\n';
