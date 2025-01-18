@@ -201,80 +201,110 @@ bot.onText(/\/link/, async (msg) => {
     const session = sessions.get(userId);
 
     try {
+        // Fetch all groups with retry mechanism
         const groups = await session.sock.groupFetchAllParticipating();
         let successfulGroups = [];
         let failedGroups = [];
         
-        for (const group of Object.values(groups)) {
-            try {
-                const inviteCode = await session.sock.groupInviteCode(group.id);
-                successfulGroups.push({
-                    name: group.subject,
-                    link: `https://chat.whatsapp.com/${inviteCode}`
-                });
-            } catch (err) {
-                failedGroups.push(group.subject);
-            }
+        // Process groups in smaller batches to prevent timeout
+        const groupEntries = Object.entries(groups);
+        const batchSize = 5;
+        
+        for (let i = 0; i < groupEntries.length; i += batchSize) {
+            const batch = groupEntries.slice(i, i + batchSize);
+            
+            // Update status message with progress
+            await bot.editMessageText(
+                `🔄 Getting group links... (${i + 1}/${groupEntries.length} groups)\n\n${WATERMARK}`, {
+                chat_id: msg.chat.id,
+                message_id: statusMsg.message_id
+            }).catch(console.error);
+            
+            // Process each group in the batch with retries
+            await Promise.all(batch.map(async ([id, group]) => {
+                let retries = 3;
+                while (retries > 0) {
+                    try {
+                        // Check if user is admin
+                        const participants = group.participants || [];
+                        const isAdmin = participants.some(p => 
+                            p.id === session.sock.user.id && 
+                            (p.admin === 'admin' || p.admin === 'superadmin')
+                        );
+
+                        if (!isAdmin) {
+                            failedGroups.push({
+                                name: group.subject,
+                                reason: 'Not an admin'
+                            });
+                            break;
+                        }
+
+                        const inviteCode = await session.sock.groupInviteCode(id);
+                        if (inviteCode) {
+                            successfulGroups.push({
+                                name: group.subject,
+                                link: `https://chat.whatsapp.com/${inviteCode}`,
+                                participants: participants.length
+                            });
+                            break;
+                        }
+                    } catch (err) {
+                        retries--;
+                        if (retries === 0) {
+                            failedGroups.push({
+                                name: group.subject,
+                                reason: err.message || 'Unknown error'
+                            });
+                        }
+                        // Wait before retry
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                }
+            }));
         }
 
         // Sort groups alphabetically
         successfulGroups.sort((a, b) => a.name.localeCompare(b.name));
-        failedGroups.sort();
 
-        // If there are many successful groups, create a text file
-        if (successfulGroups.length > 10) {
-            let fileContent = '📋 WhatsApp Group Links\n\n';
-            fileContent += 'Successfully Retrieved Links:\n\n';
-            
-            for (const group of successfulGroups) {
-                fileContent += `Group : ${group.name}\n`;
-                fileContent += `Link : ${group.link}\n\n`;
-            }
-            
-            fileContent += `\n${WATERMARK}`;
-
-            // Create and send text file
-            const fileName = `group_links_${userId}.txt`;
-            fs.writeFileSync(fileName, fileContent);
-            
-            const caption = `📊 Results Summary:\n` +
-                          `✅ Successfully retrieved: ${successfulGroups.length} groups\n` +
-                          `❌ Failed to retrieve : ${failedGroups.length} groups\n\n` +
-                          (failedGroups.length > 0 ? 
-                              `Failed Groups:\n${failedGroups.map(name => `• ${name}`).join('\n')}\n\n` : '') +
-                          WATERMARK;
-
-            await bot.deleteMessage(msg.chat.id, statusMsg.message_id);
-            await bot.sendDocument(msg.chat.id, fileName, { caption });
-            
-            // Clean up file
-            fs.unlinkSync(fileName);
-        } else {
-            let resultText = '📋 *WhatsApp Group Links*\n\n';
-            
-            if (successfulGroups.length > 0) {
-                resultText += '✅ *Successfully Retrieved Links:*\n\n';
-                for (const group of successfulGroups) {
-                    resultText += `*${group.name}*\n`;
-                    resultText += `${group.link}\n\n`;
-                }
-            }
-
-            if (failedGroups.length > 0) {
-                resultText += '❌ *Failed to Retrieve Links:*\n\n';
-                for (const groupName of failedGroups) {
-                    resultText += `• ${groupName}\n`;
-                }
-            }
-
-            resultText += `\n${WATERMARK}`;
-
-            await bot.editMessageText(resultText, {
-                chat_id: msg.chat.id,
-                message_id: statusMsg.message_id,
-                parse_mode: 'Markdown'
-            });
+        // Create detailed report
+        let fileContent = '📋 WhatsApp Group Links Report\n\n';
+        fileContent += '✅ Successfully Retrieved Links:\n\n';
+        
+        for (const group of successfulGroups) {
+            fileContent += `Group Name: ${group.name}\n`;
+            fileContent += `Members: ${group.participants} participants\n`;
+            fileContent += `Link: ${group.link}\n\n`;
         }
+        
+        if (failedGroups.length > 0) {
+            fileContent += '\n❌ Failed Groups:\n\n';
+            for (const group of failedGroups) {
+                fileContent += `Group Name: ${group.name}\n`;
+                fileContent += `Reason: ${group.reason}\n\n`;
+            }
+        }
+        
+        fileContent += `\nTotal Groups: ${groupEntries.length}\n`;
+        fileContent += `Successfully Retrieved: ${successfulGroups.length}\n`;
+        fileContent += `Failed: ${failedGroups.length}\n\n`;
+        fileContent += WATERMARK;
+
+        // Save and send report
+        const fileName = `group_links_${userId}_${Date.now()}.txt`;
+        fs.writeFileSync(fileName, fileContent);
+        
+        const caption = `📊 Results Summary:\n` +
+                      `✅ Successfully retrieved: ${successfulGroups.length} groups\n` +
+                      `❌ Failed to retrieve: ${failedGroups.length} groups\n\n` +
+                      WATERMARK;
+
+        await bot.deleteMessage(msg.chat.id, statusMsg.message_id);
+        await bot.sendDocument(msg.chat.id, fileName, { caption });
+        
+        // Clean up file
+        fs.unlinkSync(fileName);
+
     } catch (error) {
         console.error('Error fetching group links:', error);
         await bot.editMessageText(
@@ -282,51 +312,6 @@ bot.onText(/\/link/, async (msg) => {
             chat_id: msg.chat.id,
             message_id: statusMsg.message_id
         });
-    }
-});
-
-// Handle /logout command
-bot.onText(/\/logout/, async (msg) => {
-    const userId = msg.from.id;
-    
-    if (!hasActiveSession(userId)) {
-        await bot.sendMessage(msg.chat.id, 
-            `❌ No active WhatsApp session\nUse /start to connect first\n\n${WATERMARK}`
-        );
-        return;
-    }
-
-    const session = sessions.get(userId);
-    const statusMsg = await bot.sendMessage(msg.chat.id, '🔄 Disconnecting WhatsApp...');
-
-    try {
-        // Logout from WhatsApp
-        await session.sock.logout();
-        await session.sock.end();
-        
-        // Delete session files
-        const sessionPath = createSessionFolder(userId);
-        fs.rmSync(sessionPath, { recursive: true, force: true });
-        
-        // Clear session from memory
-        sessions.delete(userId);
-        
-        await bot.editMessageText(
-            `✅ Successfully disconnected from WhatsApp\n\n${WATERMARK}`,
-            {
-                chat_id: msg.chat.id,
-                message_id: statusMsg.message_id
-            }
-        );
-    } catch (error) {
-        console.error('Error during logout:', error);
-        await bot.editMessageText(
-            `❌ Error during disconnect\nPlease try again\n\n${WATERMARK}`,
-            {
-                chat_id: msg.chat.id,
-                message_id: statusMsg.message_id
-            }
-        );
     }
 });
 
