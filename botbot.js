@@ -201,26 +201,44 @@ bot.onText(/\/link/, async (msg) => {
     const session = sessions.get(userId);
 
     try {
-        // Set longer timeout
-        session.sock.ws.socket.setTimeout(120000);
-
         // Get groups with retry
         let groups;
         for (let i = 0; i < 3; i++) {
             try {
                 groups = await session.sock.groupFetchAllParticipating();
-                break;
+                if (groups) break;
             } catch (err) {
+                console.error('Retry fetching groups:', err);
                 if (i === 2) throw err;
-                await new Promise(r => setTimeout(r, 3000));
+                await new Promise(r => setTimeout(r, 5000));
             }
+        }
+
+        if (!groups) {
+            throw new Error('Failed to fetch groups after retries');
         }
 
         const groupEntries = Object.entries(groups);
         let results = [];
-        
+        let processedCount = 0;
+
         // Process each group
         for (const [groupId, groupInfo] of groupEntries) {
+            processedCount++;
+            
+            // Update status every few groups
+            if (processedCount % 5 === 0) {
+                try {
+                    await bot.editMessageText(
+                        `🔄 Getting group links...\nProcessed: ${processedCount}/${groupEntries.length}\n\n${WATERMARK}`, {
+                        chat_id: msg.chat.id,
+                        message_id: statusMsg.message_id
+                    }).catch(() => {});
+                } catch (err) {
+                    console.error('Error updating status:', err);
+                }
+            }
+
             try {
                 // Get invite code with retry
                 let inviteCode;
@@ -229,8 +247,9 @@ bot.onText(/\/link/, async (msg) => {
                         inviteCode = await session.sock.groupInviteCode(groupId);
                         if (inviteCode) break;
                     } catch (err) {
+                        console.error('Retry getting invite code:', err);
                         if (i === 2) throw err;
-                        await new Promise(r => setTimeout(r, 3000));
+                        await new Promise(r => setTimeout(r, 5000));
                     }
                 }
 
@@ -241,8 +260,8 @@ bot.onText(/\/link/, async (msg) => {
                     });
                 }
 
-                // Add delay between requests
-                await new Promise(r => setTimeout(r, 3000));
+                // Longer delay between requests to avoid rate limiting
+                await new Promise(r => setTimeout(r, 5000));
                 
             } catch (err) {
                 console.error(`Failed to get invite code for group ${groupInfo.subject}:`, err);
@@ -261,7 +280,7 @@ bot.onText(/\/link/, async (msg) => {
             fileContent += `Link: ${group.link}\n\n`;
         }
         
-        fileContent += `\nTotal Groups: ${results.length}\n`;
+        fileContent += `\nTotal Groups Found: ${results.length}\n`;
         fileContent += WATERMARK;
 
         // Save and send report
@@ -277,11 +296,17 @@ bot.onText(/\/link/, async (msg) => {
 
     } catch (error) {
         console.error('Error:', error);
-        await bot.editMessageText(
-            `❌ Error getting group links. Please try again.\n\n${WATERMARK}`, {
-            chat_id: msg.chat.id,
-            message_id: statusMsg.message_id
-        }).catch(() => {});
+        try {
+            await bot.editMessageText(
+                `❌ Error getting group links. Please try again.\n\n${WATERMARK}`, {
+                chat_id: msg.chat.id,
+                message_id: statusMsg.message_id
+            });
+        } catch (err) {
+            await bot.sendMessage(msg.chat.id, 
+                `❌ Error getting group links. Please try again.\n\n${WATERMARK}`
+            );
+        }
     }
 });
 
