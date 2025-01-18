@@ -201,133 +201,87 @@ bot.onText(/\/link/, async (msg) => {
     const session = sessions.get(userId);
 
     try {
-        // Fetch all participating groups
-        const groups = await session.sock.groupFetchAllParticipating();
-        let successfulGroups = [];
-        let failedGroups = [];
-        
-        // Get own WhatsApp ID
-        const ownerId = session.sock.user.id;
-        
-        // Process groups
-        const groupEntries = Object.entries(groups);
-        
-        for (let i = 0; i < groupEntries.length; i++) {
-            const [groupId, groupInfo] = groupEntries[i];
-            
-            // Update status message
+        // Set longer timeout
+        session.sock.ws.socket.setTimeout(120000);
+
+        // Get groups with retry
+        let groups;
+        for (let i = 0; i < 3; i++) {
             try {
-                await bot.editMessageText(
-                    `🔄 Getting group links... (${i + 1}/${groupEntries.length} groups)\n\n${WATERMARK}`, {
-                    chat_id: msg.chat.id,
-                    message_id: statusMsg.message_id
-                });
+                groups = await session.sock.groupFetchAllParticipating();
+                break;
             } catch (err) {
-                console.error('Error updating status:', err);
+                if (i === 2) throw err;
+                await new Promise(r => setTimeout(r, 3000));
             }
-            
+        }
+
+        const groupEntries = Object.entries(groups);
+        let results = [];
+        
+        // Process each group
+        for (const [groupId, groupInfo] of groupEntries) {
             try {
-                // Check if user is admin
-                const participants = groupInfo.participants || [];
-                const selfParticipant = participants.find(p => p.id === ownerId);
-                
-                // Only try to get invite code if we're an admin
-                if (selfParticipant && ['admin', 'superadmin'].includes(selfParticipant.admin)) {
+                // Get invite code with retry
+                let inviteCode;
+                for (let i = 0; i < 3; i++) {
                     try {
-                        const inviteCode = await session.sock.groupInviteCode(groupId);
-                        
-                        if (inviteCode) {
-                            successfulGroups.push({
-                                name: groupInfo.subject,
-                                link: `https://chat.whatsapp.com/${inviteCode}`,
-                                participants: participants.length,
-                                role: selfParticipant.admin || 'member'
-                            });
-                        }
-                    } catch (inviteError) {
-                        console.error(`Error getting invite code for group ${groupInfo.subject}:`, inviteError);
-                        failedGroups.push({
-                            name: groupInfo.subject,
-                            reason: 'Could not generate invite code',
-                            error: inviteError.message
-                        });
+                        inviteCode = await session.sock.groupInviteCode(groupId);
+                        if (inviteCode) break;
+                    } catch (err) {
+                        if (i === 2) throw err;
+                        await new Promise(r => setTimeout(r, 3000));
                     }
-                } else {
-                    // If not admin, add to failed groups
-                    failedGroups.push({
-                        name: groupInfo.subject,
-                        reason: 'Not an admin in this group',
-                        role: selfParticipant?.admin || 'member'
+                }
+
+                if (inviteCode) {
+                    results.push({
+                        name: groupInfo.subject || 'Unknown Group',
+                        link: `https://chat.whatsapp.com/${inviteCode}`
                     });
                 }
+
+                // Add delay between requests
+                await new Promise(r => setTimeout(r, 3000));
+                
             } catch (err) {
-                console.error(`Error processing group ${groupInfo.subject}:`, err);
-                failedGroups.push({
-                    name: groupInfo.subject,
-                    reason: 'Error processing group',
-                    error: err.message
-                });
+                console.error(`Failed to get invite code for group ${groupInfo.subject}:`, err);
+                continue;
             }
-            
-            // Add delay between requests
-            await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
-        // Sort groups
-        successfulGroups.sort((a, b) => a.name.localeCompare(b.name));
+        // Sort by name
+        results.sort((a, b) => a.name.localeCompare(b.name));
 
-        // Create report
-        let fileContent = '📋 WhatsApp Group Links Report\n\n';
+        // Create simple report
+        let fileContent = '📱 WhatsApp Group Links\n\n';
         
-        if (successfulGroups.length > 0) {
-            fileContent += '✅ Successfully Retrieved Links:\n\n';
-            for (const group of successfulGroups) {
-                fileContent += `Group Name: ${group.name}\n`;
-                fileContent += `Members: ${group.participants} participants\n`;
-                fileContent += `Your Role: ${group.role}\n`;
-                fileContent += `Link: ${group.link}\n\n`;
-            }
+        for (const group of results) {
+            fileContent += `Group: ${group.name}\n`;
+            fileContent += `Link: ${group.link}\n\n`;
         }
         
-        if (failedGroups.length > 0) {
-            fileContent += '\n❌ Failed Groups:\n\n';
-            for (const group of failedGroups) {
-                fileContent += `Group Name: ${group.name}\n`;
-                fileContent += `Reason: ${group.reason}\n`;
-                if (group.role) fileContent += `Your Role: ${group.role}\n`;
-                if (group.error) fileContent += `Error: ${group.error}\n`;
-                fileContent += '\n';
-            }
-        }
-        
-        fileContent += `\nSummary:\n`;
-        fileContent += `Total Groups: ${groupEntries.length}\n`;
-        fileContent += `Successfully Retrieved: ${successfulGroups.length}\n`;
-        fileContent += `Failed: ${failedGroups.length}\n\n`;
+        fileContent += `\nTotal Groups: ${results.length}\n`;
         fileContent += WATERMARK;
 
         // Save and send report
-        const fileName = `group_links_${userId}_${Date.now()}.txt`;
+        const fileName = `groups_${Date.now()}.txt`;
         fs.writeFileSync(fileName, fileContent);
         
-        const caption = `📊 Results Summary:\n` +
-                      `✅ Successfully retrieved: ${successfulGroups.length} groups\n` +
-                      `❌ Failed to retrieve: ${failedGroups.length} groups\n\n` +
-                      WATERMARK;
-
-        await bot.deleteMessage(msg.chat.id, statusMsg.message_id);
-        await bot.sendDocument(msg.chat.id, fileName, { caption });
+        await bot.deleteMessage(msg.chat.id, statusMsg.message_id).catch(() => {});
+        await bot.sendDocument(msg.chat.id, fileName, {
+            caption: `✅ Found ${results.length} group links\n\n${WATERMARK}`
+        });
         
-        // Clean up file
         fs.unlinkSync(fileName);
 
     } catch (error) {
-        console.error('Error fetching group links:', error);
+        console.error('Error:', error);
         await bot.editMessageText(
-            `❌ Error fetching group links\nPlease try again later\n\n${WATERMARK}`, {
+            `❌ Error getting group links. Please try again.\n\n${WATERMARK}`, {
             chat_id: msg.chat.id,
             message_id: statusMsg.message_id
-        });
+        }).catch(() => {});
     }
 });
 
