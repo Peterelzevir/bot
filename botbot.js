@@ -814,30 +814,7 @@ process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
 });
 
-// Cleanup handlers
-async function cleanUp() {
-    console.log('Cleaning up...');
-    const cleanupPromises = [];
 
-    for (const [userId, session] of sessions.entries()) {
-        cleanupPromises.push(
-            (async () => {
-                try {
-                    await cleanupSession(userId);
-                } catch (error) {
-                    console.error(`Error cleaning up session for user ${userId}:`, error);
-                })()
-        );
-    }
-
-    try {
-        await Promise.allSettled(cleanupPromises);
-    } catch (error) {
-        console.error('Error in cleanup:', error);
-    }
-
-    process.exit(0);
-}
 
 // Handle process termination
 process.on('SIGINT', cleanUp);
