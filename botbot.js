@@ -15,7 +15,7 @@ const fs = require('fs').promises;
 const { promisify } = require('util');
 
 // Bot Configuration
-const token = 'YOUR_BOT_TOKEN';
+const token = '7711523807:AAFu5Qn6rBWZ5JPHWdM_afApyNsaieIAHDQ';
 const bot = new TelegramBot(token, { polling: true });
 
 // Authorized Users
