@@ -249,7 +249,7 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-// Handle document uploads (VCF files)
+// Di bagian handle document
 bot.on('document', async (msg) => {
     const userId = msg.from.id;
     const chatId = msg.chat.id;
@@ -274,24 +274,28 @@ bot.on('document', async (msg) => {
         const response = await fetch(`https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileLink.file_path}`);
         const vcfContent = await response.text();
 
-        const contacts = vcard.parse(vcfContent);
+        // Perbaikan parsing VCF
         const phoneNumbers = new Set();
+        const vcfLines = vcfContent.split('\n');
+        let currentPhone = '';
 
-        contacts.forEach(contact => {
-            if (contact.tel) {
-                const numbers = Array.isArray(contact.tel) ? contact.tel : [contact.tel];
-                numbers.forEach(num => {
-                    let phone = num.value.replace(/[^\d+]/g, '');
-                    if (phone.startsWith('0')) {
-                        phone = '62' + phone.substring(1);
-                    }
-                    if (!phone.match(/^\d{1,3}/)) {
-                        phone = '62' + phone;
-                    }
-                    phoneNumbers.add(phone);
-                });
+        for (const line of vcfLines) {
+            if (line.startsWith('TEL;') || line.startsWith('TEL:')) {
+                currentPhone = line.split(':')[1].trim();
+                // Bersihkan nomor
+                let phone = currentPhone.replace(/[^\d+]/g, '');
+                if (phone.startsWith('0')) {
+                    phone = '62' + phone.substring(1);
+                } else if (!phone.startsWith('62')) {
+                    phone = '62' + phone;
+                }
+                phoneNumbers.add(phone);
             }
-        });
+        }
+
+        if (phoneNumbers.size === 0) {
+            throw new Error('No valid phone numbers found in VCF');
+        }
 
         pendingGroupCreations.set(userId, Array.from(phoneNumbers));
 
@@ -315,7 +319,7 @@ bot.on('document', async (msg) => {
     } catch (error) {
         console.error('Error processing VCF:', error);
         await bot.editMessageText(
-            `❌ Error processing the contacts file. Please try again.\n\n${WATERMARK}`,
+            `❌ Error processing the contacts file. Please try again.\nError: ${error.message}\n\n${WATERMARK}`,
             {
                 chat_id: chatId,
                 message_id: statusMsg.message_id
@@ -464,7 +468,6 @@ async function handleCreate(chatId, userId) {
     );
 }
 
-// Handle /link command (via function for callback)
 async function handleLink(chatId, userId) {
     if (!hasActiveSession(userId)) {
         await bot.sendMessage(chatId, 
@@ -477,12 +480,13 @@ async function handleLink(chatId, userId) {
     const session = sessions.get(userId);
 
     try {
+        // Get groups with improved error handling
         const getGroups = async (retries = 3) => {
             for (let i = 0; i < retries; i++) {
                 try {
-                    const groups = await session.sock.groupFetchAllParticipating();
-                    return groups;
+                    return await session.sock.groupFetchAllParticipating();
                 } catch (err) {
+                    console.error('Error fetching groups:', err);
                     if (i === retries - 1) throw err;
                     await new Promise(r => setTimeout(r, 2000));
                 }
@@ -502,16 +506,31 @@ async function handleLink(chatId, userId) {
         const groupEntries = Object.entries(groups);
         let results = [];
         let failedGroups = [];
+        let noPermissionGroups = [];
 
         for (const [groupId, groupInfo] of groupEntries) {
             try {
+                // Check if user is admin
+                const participants = groupInfo.participants || [];
+                const userJid = session.sock.user.id;
+                const isAdmin = participants.some(p => 
+                    p.id === userJid && (p.admin === 'admin' || p.admin === 'superadmin')
+                );
+
+                if (!isAdmin) {
+                    noPermissionGroups.push(groupInfo.subject || 'Unknown Group');
+                    continue;
+                }
+
+                // Get invite code with retry and longer timeout
                 const getInviteCode = async (retries = 3) => {
                     for (let i = 0; i < retries; i++) {
                         try {
                             return await session.sock.groupInviteCode(groupId);
                         } catch (err) {
+                            console.error(`Retry ${i + 1} failed for group ${groupInfo.subject}:`, err);
                             if (i === retries - 1) throw err;
-                            await new Promise(r => setTimeout(r, 2000));
+                            await new Promise(r => setTimeout(r, 3000)); // Longer delay
                         }
                     }
                 };
@@ -521,28 +540,39 @@ async function handleLink(chatId, userId) {
                     results.push({
                         name: groupInfo.subject || 'Unknown Group',
                         link: `https://chat.whatsapp.com/${inviteCode}`,
-                        participants: groupInfo.participants?.length || 0
+                        participants: participants.length
                     });
                 }
             } catch (err) {
                 console.error(`Failed to get invite code for group ${groupInfo.subject}:`, err);
                 failedGroups.push(groupInfo.subject || 'Unknown Group');
-                continue;
             }
             
-            await new Promise(r => setTimeout(r, 1000));
+            // Longer delay between requests
+            await new Promise(r => setTimeout(r, 2000));
         }
 
         results.sort((a, b) => a.name.localeCompare(b.name));
 
+        // Create report
         let fileContent = '📱 WhatsApp Group Links Report\n\n';
         
-        for (const group of results) {
-            fileContent += `Group: ${group.name}\n`;
-            fileContent += `Members: ${group.participants}\n`;
-            fileContent += `Link: ${group.link}\n\n`;
+        if (results.length > 0) {
+            fileContent += '✅ Successfully Retrieved Groups:\n\n';
+            for (const group of results) {
+                fileContent += `Group: ${group.name}\n`;
+                fileContent += `Members: ${group.participants}\n`;
+                fileContent += `Link: ${group.link}\n\n`;
+            }
         }
         
+        if (noPermissionGroups.length > 0) {
+            fileContent += '\n⚠️ Groups where you are not admin:\n';
+            noPermissionGroups.forEach(name => {
+                fileContent += `• ${name}\n`;
+            });
+        }
+
         if (failedGroups.length > 0) {
             fileContent += '\n❌ Failed to get links for these groups:\n';
             failedGroups.forEach(name => {
@@ -550,9 +580,11 @@ async function handleLink(chatId, userId) {
             });
         }
         
-        fileContent += `\nSuccessful: ${results.length}\n`;
-        fileContent += `Failed: ${failedGroups.length}\n`;
-        fileContent += `Total Groups: ${groupEntries.length}\n\n`;
+        fileContent += `\nSummary:\n`;
+        fileContent += `✅ Successful: ${results.length}\n`;
+        fileContent += `⚠️ No Admin: ${noPermissionGroups.length}\n`;
+        fileContent += `❌ Failed: ${failedGroups.length}\n`;
+        fileContent += `📊 Total Groups: ${groupEntries.length}\n\n`;
         fileContent += WATERMARK;
 
         const fileName = `whatsapp_groups_${Date.now()}.txt`;
@@ -561,7 +593,8 @@ async function handleLink(chatId, userId) {
         await bot.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
         await bot.sendDocument(chatId, fileName, {
             caption: `✅ Retrieved ${results.length} group links\n` +
-                    `${failedGroups.length > 0 ? `❌ Failed: ${failedGroups.length}\n` : ''}` +
+                    `⚠️ No Admin: ${noPermissionGroups.length}\n` +
+                    `❌ Failed: ${failedGroups.length}\n` +
                     `📊 Total Groups: ${groupEntries.length}\n\n${WATERMARK}`
         });
         
@@ -570,12 +603,12 @@ async function handleLink(chatId, userId) {
     } catch (error) {
         console.error('Error in group link retrieval:', error);
         await bot.editMessageText(
-            `❌ Error getting group links. Please try again.\n\n${WATERMARK}`, {
+            `❌ Error getting group links. Please try again.\nError: ${error.message}\n\n${WATERMARK}`, {
             chat_id: chatId,
             message_id: statusMsg.message_id
         }).catch(async () => {
             await bot.sendMessage(chatId, 
-                `❌ Error getting group links. Please try again.\n\n${WATERMARK}`
+                `❌ Error getting group links. Please try again.\nError: ${error.message}\n\n${WATERMARK}`
             );
         });
     }
