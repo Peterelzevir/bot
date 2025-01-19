@@ -7,7 +7,7 @@ const {
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     getAggregateVotesInPollMessage
-} = require('@whiskeysocket/baileys');
+} = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode');
 const fs = require('fs');
