@@ -15,7 +15,7 @@ const fs = require('fs').promises;
 const { promisify } = require('util');
 
 // Bot Configuration
-const token = '7711523807:AAFu5Qn6rBWZ5JPHWdM_afApyNsaieIAHDQ';
+const token = 'YOUR_BOT_TOKEN';
 const bot = new TelegramBot(token, { polling: true });
 
 // Authorized Users
@@ -155,25 +155,33 @@ function parseVCF(content) {
         line = line.trim();
         
         if (line.startsWith('TEL;') || line.startsWith('TEL:')) {
-            // Extract phone number
+            // Extract phone number handling all common formats
             let number = line.split(':')[1];
             if (number) {
-                // Clean the number
+                // Remove all non-numeric characters
                 number = number.replace(/[^0-9]/g, '');
                 
-                // Handle different number formats
-                if (number.startsWith('0')) {
-                    number = '62' + number.substring(1);
-                } else if (!number.startsWith('62') && !number.startsWith('+')) {
-                    number = '62' + number;
-                } else if (number.startsWith('+')) {
+                // Handle all possible number formats
+                if (number.startsWith('62')) {
+                    // Already has country code
+                    number = number;
+                } else if (number.startsWith('+62')) {
+                    // Remove the plus
                     number = number.substring(1);
+                } else if (number.startsWith('0')) {
+                    // Replace leading 0 with 62
+                    number = '62' + number.substring(1);
+                } else if (!number.startsWith('62')) {
+                    // Add country code if missing
+                    number = '62' + number;
                 }
                 
-                // Add WhatsApp suffix
-                const waNumber = number + '@s.whatsapp.net';
-                if (!contacts.includes(waNumber)) {
-                    contacts.push(waNumber);
+                // Validate minimum length (at least 10 digits after country code)
+                if (number.length >= 12) {
+                    const waNumber = number + '@s.whatsapp.net';
+                    if (!contacts.includes(waNumber)) {
+                        contacts.push(waNumber);
+                    }
                 }
             }
         }
@@ -327,7 +335,14 @@ bot.on('document', async (msg) => {
     }
 
     try {
-        const processingMsg = await bot.sendMessage(userId, '⏳ Processing VCF file...');
+        const processingMsg = await bot.sendMessage(userId, 
+            '⏳ *Processing VCF File*\n\n' +
+            '• Reading file contents...\n' +
+            '• Validating contact formats...\n' +
+            '• Preparing contact list...\n\n' +
+            'Please wait...', {
+            parse_mode: 'Markdown'
+        });
         
         const file = await bot.getFile(msg.document.file_id);
         const response = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
@@ -399,10 +414,17 @@ bot.on('text', async (msg) => {
             parse_mode: 'Markdown'
         });
         
-        // Create group
-        const group = await sock.groupCreate(groupName, contacts);
+        // Validate contacts format and remove duplicates
+        const validParticipants = [...new Set(contacts)].map(id => ({ id }));
         
-        if (group.status) {
+        // Create group with proper structure
+        const group = await sock.groupCreate(
+            groupName,
+            validParticipants,
+            { ephemeralDuration: 0 }
+        );
+        
+        if (group && group.id) {
             try {
                 // Get group metadata
                 const groupInfo = await sock.groupMetadata(group.id);
