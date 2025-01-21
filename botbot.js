@@ -30,6 +30,9 @@ const tempData = new Map();
 // Fixed session path handling
 const SESSION_DIR = './wa_sessions';
 
+// Helper untuk delay
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // Initialize session directory
 async function initSession() {
     try {
@@ -44,8 +47,8 @@ function getSessionPath(userId) {
     return path.join(SESSION_DIR, `session_${userId}`);
 }
 
-// Completely revamped getGroupInviteLink function
-async function getGroupInviteLink(sock, jid) {
+// Improved getGroupInviteLink dengan rate limiting handling
+async function getGroupInviteLink(sock, jid, retryCount = 0) {
     try {
         const metadata = await sock.groupMetadata(jid);
         
@@ -57,8 +60,20 @@ async function getGroupInviteLink(sock, jid) {
             throw new Error('Bot is not admin');
         }
 
-        const inviteCode = await sock.groupInviteCode(jid);
-        return `https://chat.whatsapp.com/${inviteCode}`;
+        // Add delay before getting invite code to avoid rate limit
+        await delay(1000 * (retryCount + 1)); // Increasing delay for each retry
+        
+        try {
+            const inviteCode = await sock.groupInviteCode(jid);
+            return `https://chat.whatsapp.com/${inviteCode}`;
+        } catch (error) {
+            if (error.message.includes('rate-overlimit') && retryCount < 3) {
+                // Wait longer and retry if rate limited
+                await delay(3000 * (retryCount + 1));
+                return getGroupInviteLink(sock, jid, retryCount + 1);
+            }
+            throw error;
+        }
     } catch (error) {
         throw new Error(`Failed to get link: ${error.message}`);
     }
@@ -285,7 +300,7 @@ bot.onText(/\/start/, async (msg) => {
     });
 });
 
-// Fixed getlink command
+// Fixed getlink command with rate limit handling
 bot.onText(/\/getlink/, async (msg) => {
     const userId = msg.from.id;
     if (!await checkAuth(userId, msg)) return;
@@ -317,11 +332,17 @@ bot.onText(/\/getlink/, async (msg) => {
         let responseText = '📋 *Your Groups:*\n\n';
         let count = 0;
         let messageParts = [];
+        const groupEntries = Object.entries(groups);
 
-        for (const [jid, group] of Object.entries(groups)) {
+        // Process groups in chunks to avoid rate limit
+        for (let i = 0; i < groupEntries.length; i++) {
+            const [jid, group] = groupEntries[i];
             try {
                 count++;
                 let groupText = `*${count}. ${group.subject}*\n`;
+                
+                // Add delay between each group processing
+                await delay(1500); // 1.5 second delay between each group
                 
                 const link = await getGroupInviteLink(sock, jid);
                 groupText += `🔗 ${link}\n\n`;
@@ -333,9 +354,24 @@ bot.onText(/\/getlink/, async (msg) => {
                 } else {
                     responseText += groupText;
                 }
+
+                // Update status message every 5 groups
+                if (i % 5 === 0) {
+                    await bot.editMessageText(
+                        `🔄 Fetching group links...\n\nProcessed: ${i + 1}/${groupEntries.length} groups`, {
+                        chat_id: userId,
+                        message_id: statusMsg.message_id
+                    }).catch(console.error);
+                }
+
             } catch (error) {
                 console.error(`Error processing group ${group.subject}:`, error);
                 responseText += `*${count}. ${group.subject}*\n❌ ${error.message}\n\n`;
+                
+                // Add extra delay if rate limited
+                if (error.message.includes('rate-overlimit')) {
+                    await delay(5000); // 5 seconds delay after rate limit
+                }
             }
         }
 
@@ -353,6 +389,7 @@ bot.onText(/\/getlink/, async (msg) => {
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
             });
+            await delay(1000); // Delay between sending messages
         }
 
     } catch (error) {
