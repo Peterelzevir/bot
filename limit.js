@@ -125,8 +125,7 @@ _bot ini akan membantu menghubungkan anda dengan admin @hiyaok_
 • Respon cepat & handal
 • Mode Grup & Private Chat\`
 
-```note bang
-silakan kirim pesan kamu, @hiyaok akan segera merespon!```
+_silakan kirim pesan kamu, @hiyaok akan segera merespon!_
 
 _💫 Support by @hiyaok_`;
 
