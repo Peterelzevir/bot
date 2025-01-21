@@ -1,4 +1,3 @@
-// index.js
 const TelegramBot = require('node-telegram-bot-api');
 const { 
     default: makeWASocket,
@@ -13,53 +12,73 @@ const pino = require('pino');
 const fetch = require('node-fetch');
 const fs = require('fs').promises;
 const { promisify } = require('util');
+const path = require('path');
 
 // Bot Configuration
-const token = '7711523807:AAFu5Qn6rBWZ5JPHWdM_afApyNsaieIAHDQ';
+const token = '7711523807:AAFB_TTpeR1Hz8wVcQcpz6yu6cLXeLBIs8c';
 const bot = new TelegramBot(token, { polling: true });
 
 // Authorized Users
 const AUTHORIZED_USERS = [6022261644, 5988451717];
 
-// Store Management
+// Store Management with better memory management
 const sessions = new Map();
 const qrMessages = new Map();
 const userStates = new Map();
+const tempData = new Map();
 
-// Helper function to get group invite link
+// Fixed session path handling
+const SESSION_DIR = './wa_sessions';
+
+// Initialize session directory
+async function initSession() {
+    try {
+        await fs.mkdir(SESSION_DIR, { recursive: true });
+    } catch (error) {
+        console.error('Session directory init error:', error);
+    }
+}
+
+// Get session path for user
+function getSessionPath(userId) {
+    return path.join(SESSION_DIR, `session_${userId}`);
+}
+
+// Completely revamped getGroupInviteLink function
 async function getGroupInviteLink(sock, jid) {
     try {
-        const groupMetadata = await sock.groupMetadata(jid);
-        const botNumber = sock.user.id;
-        const isAdmin = groupMetadata.participants.some(
-            p => p.id === botNumber && (p.admin === 'admin' || p.admin === 'superadmin')
-        );
-
-        if (!isAdmin) {
-            throw new Error('Bot bukan admin di grup ini');
+        const metadata = await sock.groupMetadata(jid);
+        
+        // Verify bot's admin status
+        const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+        const participant = metadata.participants.find(p => p.id === botId);
+        
+        if (!participant?.admin) {
+            throw new Error('Bot is not admin');
         }
 
         const inviteCode = await sock.groupInviteCode(jid);
         return `https://chat.whatsapp.com/${inviteCode}`;
     } catch (error) {
-        console.error('Error getting group link:', error);
-        throw error;
+        throw new Error(`Failed to get link: ${error.message}`);
     }
 }
 
-// Authorization Check
-async function checkAuthorization(userId, msg) {
+// Fixed authorization check
+async function checkAuth(userId, msg) {
     if (!AUTHORIZED_USERS.includes(userId)) {
-        await bot.sendMessage(msg.chat.id, '⛔ Access Denied.\n\nYou are not authorized to use this bot.');
+        await bot.sendMessage(msg.chat.id, '⛔ Access denied.');
         return false;
     }
     return true;
 }
 
-// WhatsApp Connection Handler
+// Completely rebuilt WhatsApp connection handler
 async function connectToWhatsApp(userId) {
+    const sessionPath = getSessionPath(userId);
+    
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('Hiyaok Create');
+        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
         const { version } = await fetchLatestBaileysVersion();
         
         const sock = makeWASocket({
@@ -70,12 +89,15 @@ async function connectToWhatsApp(userId) {
                 keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
             },
             logger: pino({ level: 'silent' }),
-            msgRetryCounterMap: {},
+            browser: ["Chrome (Linux)", "Desktop", "1.0.0"],
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
-            emitOwnEvents: true
+            keepAliveIntervalMs: 10000,
+            emitOwnEvents: true,
+            markOnlineOnConnect: false
         });
 
+        // Enhanced connection handling
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
@@ -83,47 +105,50 @@ async function connectToWhatsApp(userId) {
                 try {
                     const qrImage = await QRCode.toBuffer(qr);
                     
+                    // Clean up previous QR
                     if (qrMessages.has(userId)) {
                         try {
                             await bot.deleteMessage(userId, qrMessages.get(userId));
                         } catch (err) {
-                            console.log('Previous QR deletion error:', err);
+                            console.error('QR cleanup error:', err);
                         }
                     }
 
                     const msg = await bot.sendPhoto(userId, qrImage, {
-                        caption: '📱 *WhatsApp QR Code*\n\n' +
-                                '1️⃣ Buka WhatsApp di HP Anda\n' +
-                                '2️⃣ Ketuk Menu/Settings dan pilih *WhatsApp Web*\n' +
-                                '3️⃣ Arahkan kamera HP ke QR code ini\n\n' +
-                                '⚠️ QR code akan expired dalam 30 detik',
+                        caption: '📱 *Scan QR Code*\n\n' +
+                                '1️⃣ Open WhatsApp\n' +
+                                '2️⃣ Go to Settings > WhatsApp Web\n' +
+                                '3️⃣ Scan this QR code\n\n' +
+                                '⚠️ QR expires in 20 seconds',
                         parse_mode: 'Markdown',
                         reply_markup: {
                             inline_keyboard: [[
-                                { text: '❌ Batalkan Koneksi', callback_data: 'cancel_login' }
+                                { text: '❌ Cancel', callback_data: 'cancel_login' }
                             ]]
                         }
                     });
                     
                     qrMessages.set(userId, msg.message_id);
                 } catch (err) {
-                    console.error('QR generation error:', err);
-                    await bot.sendMessage(userId, '❌ Error generating QR code. Please try again.');
+                    console.error('QR error:', err);
+                    await bot.sendMessage(userId, '❌ QR generation failed. Please try again.');
                 }
             }
 
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error instanceof Boom) ? 
-                    lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : true;
+                const shouldReconnect = (lastDisconnect?.error instanceof Boom) && 
+                    lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut;
                 
                 if (shouldReconnect) {
-                    await bot.sendMessage(userId, '🔄 Menghubungkan ulang ke WhatsApp...\n\nMohon tunggu...');
-                    connectToWhatsApp(userId);
+                    console.log('Reconnecting...');
+                    await bot.sendMessage(userId, '🔄 Connection lost. Reconnecting...');
+                    setTimeout(() => connectToWhatsApp(userId), 3000);
                 } else {
-                    await bot.sendMessage(userId, '📴 Sesi WhatsApp telah logout', {
+                    console.log('Connection closed');
+                    await bot.sendMessage(userId, '📴 Session ended', {
                         reply_markup: {
                             inline_keyboard: [[
-                                { text: '🔄 Hubungkan Kembali', callback_data: 'connect' }
+                                { text: '🔄 Reconnect', callback_data: 'connect' }
                             ]]
                         }
                     });
@@ -135,21 +160,25 @@ async function connectToWhatsApp(userId) {
             if (connection === 'open') {
                 sessions.set(userId, sock);
                 
+                // Clean up QR message
                 if (qrMessages.has(userId)) {
                     try {
                         await bot.deleteMessage(userId, qrMessages.get(userId));
                         qrMessages.delete(userId);
                     } catch (err) {
-                        console.log('QR message deletion error:', err);
+                        console.error('QR cleanup error:', err);
                     }
                 }
 
-                await bot.sendMessage(userId, '✅ *WhatsApp Berhasil Terhubung!*\n\n' +
-                    'Pilih tindakan dari menu di bawah:', {
+                await bot.sendMessage(userId, '✅ *WhatsApp Connected!*\n\n' +
+                    'Choose an action:', {
                     parse_mode: 'Markdown',
                     reply_markup: {
                         inline_keyboard: [[
-                            { text: '📱 Buat Grup Baru', callback_data: 'create_group' },
+                            { text: '📱 Create Group', callback_data: 'create_group' },
+                            { text: '🔗 Get Links', callback_data: 'get_links' }
+                        ],
+                        [
                             { text: '🚪 Logout', callback_data: 'logout' }
                         ]]
                     }
@@ -158,89 +187,115 @@ async function connectToWhatsApp(userId) {
         });
 
         sock.ev.on('creds.update', saveCreds);
+        
         return sock;
     } catch (error) {
         console.error('Connection error:', error);
-        await bot.sendMessage(userId, '❌ Gagal terhubung ke WhatsApp. Silakan coba lagi.');
+        await bot.sendMessage(userId, '❌ Connection failed. Please try again.');
         return null;
     }
 }
 
-// Parse VCF content
+// Improved session clearing
+async function clearSession(userId) {
+    try {
+        const sessionPath = getSessionPath(userId);
+        await fs.rm(sessionPath, { recursive: true, force: true });
+        sessions.delete(userId);
+        qrMessages.delete(userId);
+        userStates.delete(userId);
+        tempData.delete(userId);
+    } catch (error) {
+        console.error('Session clearing error:', error);
+        throw error;
+    }
+}
+
+// Fixed VCF parsing
 function parseVCF(content) {
-    const contacts = [];
+    const contacts = new Set();
     const lines = content.split('\n');
-    let currentNumber = null;
     
-    for (let line of lines) {
-        line = line.trim();
+    for (const line of lines) {
+        const trimmed = line.trim();
         
-        if (line.startsWith('TEL;') || line.startsWith('TEL:')) {
-            let number = line.split(':')[1];
-            if (number) {
-                number = number.replace(/[^0-9]/g, '');
-                
-                if (number.startsWith('62')) {
-                    number = number;
-                } else if (number.startsWith('+62')) {
-                    number = number.substring(1);
-                } else if (number.startsWith('0')) {
-                    number = '62' + number.substring(1);
-                } else if (!number.startsWith('62')) {
-                    number = '62' + number;
-                }
-                
-                if (number.length >= 12) {
-                    const waNumber = number + '@s.whatsapp.net';
-                    if (!contacts.includes(waNumber)) {
-                        contacts.push(waNumber);
-                    }
-                }
+        if (trimmed.startsWith('TEL')) {
+            let number = trimmed.split(':')[1]?.replace(/[^0-9+]/g, '');
+            if (!number) continue;
+
+            // Format number
+            if (number.startsWith('+62')) {
+                number = number.substring(1);
+            } else if (number.startsWith('0')) {
+                number = '62' + number.substring(1);
+            } else if (!number.startsWith('62')) {
+                number = '62' + number;
+            }
+
+            // Validate number
+            if (number.length >= 10 && number.length <= 15) {
+                contacts.add(number + '@s.whatsapp.net');
             }
         }
     }
     
-    return contacts;
+    return Array.from(contacts);
 }
 
-// Clear session data
-async function clearSession(userId) {
-    try {
-        const sessionPath = 'Hiyaok Create';
-        await fs.rm(sessionPath, { recursive: true, force: true });
-    } catch (error) {
-        console.error('Session clearing error:', error);
+// Improved group creation with retries
+async function createGroup(sock, name, participants, maxRetries = 3) {
+    let lastError;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const group = await sock.groupCreate(name, participants);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Verify group creation
+            const metadata = await sock.groupMetadata(group.id);
+            if (!metadata) throw new Error('Failed to verify group creation');
+            
+            return group;
+        } catch (error) {
+            console.error(`Group creation attempt ${attempt + 1} failed:`, error);
+            lastError = error;
+            
+            if (attempt < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+        }
     }
+    
+    throw lastError || new Error('Failed to create group after maximum retries');
 }
 
-// Command Handlers
+// Command handlers
 bot.onText(/\/start/, async (msg) => {
     const userId = msg.from.id;
-    if (!await checkAuthorization(userId, msg)) return;
+    if (!await checkAuth(userId, msg)) return;
     
-    await bot.sendMessage(userId, '👋 *Selamat datang di WhatsApp Group Manager!*\n\n' +
-        'Bot ini membantu Anda membuat grup WhatsApp dari file kontak VCF.\n\n' +
-        'Pilih opsi untuk memulai:', {
+    await bot.sendMessage(userId, '👋 *Welcome!*\n\n' +
+        'Choose an option:', {
         parse_mode: 'Markdown',
         reply_markup: {
             inline_keyboard: [[
-                { text: '🔄 Hubungkan WhatsApp', callback_data: 'connect' }
+                { text: '🔄 Connect WhatsApp', callback_data: 'connect' }
             ]]
         }
     });
 });
 
-// Get group links command
+// Fixed getlink command
 bot.onText(/\/getlink/, async (msg) => {
     const userId = msg.from.id;
-    if (!await checkAuthorization(userId, msg)) return;
+    if (!await checkAuth(userId, msg)) return;
     
     const sock = sessions.get(userId);
     if (!sock) {
-        await bot.sendMessage(userId, '❌ WhatsApp belum terkoneksi!\n\nSilakan koneksikan terlebih dahulu.', {
+        await bot.sendMessage(userId, '❌ Not connected!\n\nPlease connect first:', {
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '🔄 Koneksikan WhatsApp', callback_data: 'connect' }
+                    { text: '🔄 Connect WhatsApp', callback_data: 'connect' }
                 ]]
             }
         });
@@ -248,53 +303,75 @@ bot.onText(/\/getlink/, async (msg) => {
     }
 
     try {
-        const statusMsg = await bot.sendMessage(userId, '🔍 Mengambil link grup...');
-        
+        const statusMsg = await bot.sendMessage(userId, '🔍 Fetching groups...');
         const groups = await sock.groupFetchAllParticipating();
-        let responseText = '📋 *Daftar Grup WhatsApp Anda:*\n\n';
+        
+        if (!groups || Object.keys(groups).length === 0) {
+            await bot.editMessageText('❌ No groups found!', {
+                chat_id: userId,
+                message_id: statusMsg.message_id
+            });
+            return;
+        }
+
+        let responseText = '📋 *Your Groups:*\n\n';
         let count = 0;
+        let messageParts = [];
 
         for (const [jid, group] of Object.entries(groups)) {
             try {
+                count++;
+                let groupText = `*${count}. ${group.subject}*\n`;
+                
                 const link = await getGroupInviteLink(sock, jid);
-                responseText += `*${++count}. ${group.subject}*\n`;
-                responseText += `🔗 Link: ${link}\n\n`;
-            } catch (err) {
-                responseText += `*${++count}. ${group.subject}*\n`;
-                responseText += `❌ Error: ${err.message}\n\n`;
+                groupText += `🔗 ${link}\n\n`;
+
+                // Split into parts if too long
+                if ((responseText + groupText).length > 3000) {
+                    messageParts.push(responseText);
+                    responseText = groupText;
+                } else {
+                    responseText += groupText;
+                }
+            } catch (error) {
+                console.error(`Error processing group ${group.subject}:`, error);
+                responseText += `*${count}. ${group.subject}*\n❌ ${error.message}\n\n`;
             }
         }
 
-        if (count === 0) {
-            responseText = '❌ Tidak ada grup ditemukan!';
+        // Send remaining text
+        if (responseText) {
+            messageParts.push(responseText);
         }
 
-        await bot.editMessageText(responseText, {
-            chat_id: userId,
-            message_id: statusMsg.message_id,
-            parse_mode: 'Markdown',
-            disable_web_page_preview: true
-        });
+        // Delete status message
+        await bot.deleteMessage(userId, statusMsg.message_id).catch(console.error);
+
+        // Send all parts
+        for (const part of messageParts) {
+            await bot.sendMessage(userId, part, {
+                parse_mode: 'Markdown',
+                disable_web_page_preview: true
+            });
+        }
 
     } catch (error) {
-        console.error('Error fetching groups:', error);
-        await bot.sendMessage(userId, '❌ Gagal mengambil link grup. Silakan coba lagi.');
+        console.error('Get links error:', error);
+        await bot.sendMessage(userId, '❌ Failed to fetch groups. Please try again.');
     }
 });
 
-// Callback query handler
+// Improved callback query handler
 bot.on('callback_query', async (callbackQuery) => {
     const userId = callbackQuery.from.id;
-    if (!await checkAuthorization(userId, callbackQuery.message)) return;
+    if (!await checkAuth(userId, callbackQuery.message)) return;
     
     const data = callbackQuery.data;
 
     switch (data) {
         case 'connect':
-            await bot.sendMessage(userId, '🔄 *Memulai Koneksi WhatsApp*\n\nMohon tunggu...', {
-                parse_mode: 'Markdown'
-            });
-            connectToWhatsApp(userId);
+            await bot.sendMessage(userId, '🔄 Starting WhatsApp connection...');
+            await connectToWhatsApp(userId);
             break;
             
         case 'cancel_login':
@@ -302,10 +379,10 @@ bot.on('callback_query', async (callbackQuery) => {
                 await bot.deleteMessage(userId, qrMessages.get(userId));
                 qrMessages.delete(userId);
             }
-            await bot.sendMessage(userId, '❌ Koneksi dibatalkan\n\nPilih opsi:', {
+            await bot.sendMessage(userId, '❌ Connection cancelled\n\nChoose an option:', {
                 reply_markup: {
                     inline_keyboard: [[
-                        { text: '🔄 Hubungkan WhatsApp', callback_data: 'connect' }
+                        { text: '🔄 Connect WhatsApp', callback_data: 'connect' }
                     ]]
                 }
             });
@@ -315,54 +392,61 @@ bot.on('callback_query', async (callbackQuery) => {
             const sock = sessions.get(userId);
             if (sock) {
                 try {
+                    // Properly close the connection
                     await sock.logout();
-                    sessions.delete(userId);
                     await clearSession(userId);
-                    await bot.sendMessage(userId, '✅ *Berhasil logout dari WhatsApp*\n\n' +
-                        'Pilih opsi untuk melanjutkan:', {
-                        parse_mode: 'Markdown',
+                    
+                    await bot.sendMessage(userId, '✅ Successfully logged out\n\n' +
+                        'Choose an option:', {
                         reply_markup: {
                             inline_keyboard: [[
-                                { text: '🔄 Hubungkan WhatsApp', callback_data: 'connect' }
+                                { text: '🔄 Connect WhatsApp', callback_data: 'connect' }
                             ]]
                         }
                     });
                 } catch (error) {
                     console.error('Logout error:', error);
-                    await bot.sendMessage(userId, '❌ Error saat logout. Silakan coba lagi.');
+                    await bot.sendMessage(userId, '❌ Logout failed. Please try again.');
                 }
             }
+            break;
+            
+        case 'get_links':
+            // Trigger getlink command
+            await bot.emit('text', { 
+                text: '/getlink', 
+                from: { id: userId },
+                chat: { id: userId }
+            });
             break;
             
         case 'create_group':
             const waSocket = sessions.get(userId);
             if (!waSocket) {
-                await bot.sendMessage(userId, '❌ *WhatsApp belum terhubung!*\n\n' +
-                    'Silakan hubungkan WhatsApp terlebih dahulu:', {
-                    parse_mode: 'Markdown',
+                await bot.sendMessage(userId, '❌ Not connected!\n\nPlease connect first:', {
                     reply_markup: {
                         inline_keyboard: [[
-                            { text: '🔄 Hubungkan WhatsApp', callback_data: 'connect' }
+                            { text: '🔄 Connect WhatsApp', callback_data: 'connect' }
                         ]]
                     }
                 });
                 return;
             }
             
-            await bot.sendMessage(userId, '📁 *Kirim File Kontak VCF*\n\n' +
-                '1. Export kontak dari HP Anda sebagai file VCF\n' +
-                '2. Kirim file VCF tersebut ke sini\n' +
-                '3. Tunggu proses selesai\n\n' +
-                '⚠️ Pastikan semua nomor adalah nomor WhatsApp yang valid', {
+            await bot.sendMessage(userId, '📁 *Send VCF File*\n\n' +
+                '1. Export contacts as VCF\n' +
+                '2. Send the file here\n' +
+                '3. Wait for processing\n\n' +
+                '⚠️ Ensure all numbers are valid WhatsApp numbers', {
                 parse_mode: 'Markdown'
             });
             userStates.set(userId, 'waiting_vcf');
             break;
             
         case 'confirm_contacts':
-            await bot.sendMessage(userId, '✏️ *Masukkan Nama Grup*\n\n' +
-                'Silakan kirim nama untuk grup WhatsApp baru Anda.\n\n' +
-                '⚠️ Nama grup harus antara 1-25 karakter', {
+            await bot.sendMessage(userId, '✏️ *Enter Group Name*\n\n' +
+                'Send a name for your new WhatsApp group.\n\n' +
+                '⚠️ Name must be 1-25 characters', {
                 parse_mode: 'Markdown'
             });
             userStates.set(userId, 'waiting_group_name');
@@ -370,13 +454,13 @@ bot.on('callback_query', async (callbackQuery) => {
             
         case 'cancel_group':
             userStates.delete(userId);
-            sessions.delete(userId + '_contacts');
+            tempData.delete(userId);
             
-            await bot.sendMessage(userId, '❌ Pembuatan grup dibatalkan\n\n' +
-                'Pilih opsi:', {
+            await bot.sendMessage(userId, '❌ Group creation cancelled\n\n' +
+                'Choose an option:', {
                 reply_markup: {
                     inline_keyboard: [[
-                        { text: '📱 Buat Grup Baru', callback_data: 'create_group' },
+                        { text: '📱 Create New Group', callback_data: 'create_group' },
                         { text: '🚪 Logout', callback_data: 'logout' }
                     ]]
                 }
@@ -388,24 +472,24 @@ bot.on('callback_query', async (callbackQuery) => {
 // VCF file handler
 bot.on('document', async (msg) => {
     const userId = msg.from.id;
-    if (!await checkAuthorization(userId, msg)) return;
+    if (!await checkAuth(userId, msg)) return;
     
     const state = userStates.get(userId);
     if (state !== 'waiting_vcf') return;
     
     const sock = sessions.get(userId);
     if (!sock) {
-        await bot.sendMessage(userId, '❌ WhatsApp belum terhubung!');
+        await bot.sendMessage(userId, '❌ WhatsApp not connected!');
         return;
     }
 
     try {
         const processingMsg = await bot.sendMessage(userId, 
-            '⏳ *Memproses File VCF*\n\n' +
-            '• Membaca isi file...\n' +
-            '• Validasi format kontak...\n' +
-            '• Menyiapkan daftar kontak...\n\n' +
-            'Mohon tunggu...', {
+            '⏳ *Processing VCF File*\n\n' +
+            '• Reading file...\n' +
+            '• Validating contacts...\n' +
+            '• Preparing list...\n\n' +
+            'Please wait...', {
             parse_mode: 'Markdown'
         });
         
@@ -416,18 +500,18 @@ bot.on('document', async (msg) => {
         const contacts = parseVCF(vcfContent);
         
         if (contacts.length === 0) {
-            await bot.editMessageText('❌ Tidak ada kontak valid dalam file VCF.\n\nSilakan cek file dan coba lagi.', {
+            await bot.editMessageText('❌ No valid contacts found.\n\nPlease check the file and try again.', {
                 chat_id: userId,
                 message_id: processingMsg.message_id
             });
             return;
         }
         
-        sessions.set(userId + '_contacts', contacts);
+        tempData.set(userId, contacts);
         
-        const confirmMessage = `📋 *Pemrosesan Kontak Selesai*\n\n` +
-            `📱 Total Kontak Ditemukan: ${contacts.length}\n\n` +
-            `Silakan konfirmasi untuk melanjutkan:`;
+        const confirmMessage = `📋 *Contact Processing Complete*\n\n` +
+            `📱 Total Contacts Found: ${contacts.length}\n\n` +
+            `Please confirm to continue:`;
             
         await bot.editMessageText(confirmMessage, {
             chat_id: userId,
@@ -435,8 +519,8 @@ bot.on('document', async (msg) => {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '✅ Lanjutkan', callback_data: 'confirm_contacts' },
-                    { text: '❌ Batal', callback_data: 'cancel_group' }
+                    { text: '✅ Continue', callback_data: 'confirm_contacts' },
+                    { text: '❌ Cancel', callback_data: 'cancel_group' }
                 ]]
             }
         });
@@ -445,25 +529,25 @@ bot.on('document', async (msg) => {
         
     } catch (error) {
         console.error('VCF processing error:', error);
-        await bot.sendMessage(userId, '❌ Gagal memproses file VCF.\n\nSilakan cek format file dan coba lagi.');
+        await bot.sendMessage(userId, '❌ Failed to process VCF file.\n\nPlease check the format and try again.');
     }
 });
 
 // Group name handler
 bot.on('text', async (msg) => {
     const userId = msg.from.id;
-    if (!await checkAuthorization(userId, msg)) return;
+    if (!await checkAuth(userId, msg)) return;
     
     const state = userStates.get(userId);
     if (state !== 'waiting_group_name') return;
     
     const sock = sessions.get(userId);
-    const contacts = sessions.get(userId + '_contacts');
+    const contacts = tempData.get(userId);
     const groupName = msg.text.trim();
     
-    if (groupName.length > 25) {
-        await bot.sendMessage(userId, '❌ *Error:* Nama grup terlalu panjang!\n\n' +
-            'Mohon kirimkan nama yang lebih pendek (maksimal 25 karakter)', {
+    if (!groupName || groupName.length > 25) {
+        await bot.sendMessage(userId, '❌ *Error:* Invalid group name!\n\n' +
+            'Please send a name between 1-25 characters.', {
             parse_mode: 'Markdown'
         });
         return;
@@ -471,65 +555,54 @@ bot.on('text', async (msg) => {
     
     try {
         const statusMsg = await bot.sendMessage(userId, 
-            '⏳ *Membuat Grup WhatsApp*\n\n' +
-            '• Menyiapkan kontak...\n' +
-            '• Memulai pembuatan grup...\n' +
-            '• Menambahkan member...\n\n' +
-            'Mohon tunggu...', {
+            '⏳ *Creating WhatsApp Group*\n\n' +
+            '• Preparing contacts...\n' +
+            '• Creating group...\n' +
+            '• Adding members...\n\n' +
+            'Please wait...', {
             parse_mode: 'Markdown'
         });
-        
-        // Format participants properly
-        const validParticipants = [...new Set(contacts)].map(id => ({
+
+        // Format participants properly and remove duplicates
+        const uniqueContacts = [...new Set(contacts)];
+        const validParticipants = uniqueContacts.map(id => ({
             id: id.includes('@s.whatsapp.net') ? id : `${id}@s.whatsapp.net`
         }));
-        
-        // Create group with retry mechanism
-        let retries = 3;
-        let group = null;
-        
-        while (retries > 0 && !group) {
-            try {
-                group = await sock.groupCreate(
-                    groupName,
-                    validParticipants
-                );
-                break;
-            } catch (err) {
-                retries--;
-                if (retries === 0) throw err;
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-        }
+
+        // Create group with enhanced error handling
+        const group = await createGroup(sock, groupName, validParticipants);
 
         if (group && group.id) {
-            // Wait for group to be properly created
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Wait for group creation to complete
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
             try {
                 const groupInfo = await sock.groupMetadata(group.id);
                 const successfulMembers = groupInfo.participants.length;
                 const failedMembers = contacts.length - successfulMembers;
                 const successRate = ((successfulMembers / contacts.length) * 100).toFixed(1);
-                const displayGroupId = group.id.split('@')[0];
                 
-                const successMessage = `✅ *Grup WhatsApp Berhasil Dibuat!*\n\n` +
-                    `📱 *Detail Grup:*\n` +
-                    `• Nama: ${groupName}\n` +
-                    `• ID: ${displayGroupId}\n\n` +
-                    `👥 *Statistik Member:*\n` +
-                    `• Total Kontak: ${contacts.length}\n` +
-                    `• Berhasil Ditambahkan: ${successfulMembers}\n` +
-                    `• Gagal Ditambahkan: ${failedMembers}\n` +
-                    `• Tingkat Keberhasilan: ${successRate}%\n\n` +
-                    (failedMembers > 0 ? 
-                        `ℹ️ *Catatan:* Beberapa member tidak bisa ditambahkan karena:\n` +
-                        `• Nomor tidak valid\n` +
-                        `• Nomor tidak terdaftar di WhatsApp\n` +
-                        `• Pengaturan privasi\n` +
-                        `• Batasan WhatsApp lainnya\n\n` : 
-                        `🌟 *Sempurna! Semua member berhasil ditambahkan!*\n\n`) +
-                    `Pilih tindakan selanjutnya:`;
+                let successMessage = `✅ *WhatsApp Group Created!*\n\n` +
+                    `📱 *Group Details:*\n` +
+                    `• Name: ${groupName}\n` +
+                    `• ID: ${group.id.split('@')[0]}\n\n` +
+                    `👥 *Member Statistics:*\n` +
+                    `• Total Contacts: ${contacts.length}\n` +
+                    `• Successfully Added: ${successfulMembers}\n` +
+                    `• Failed to Add: ${failedMembers}\n` +
+                    `• Success Rate: ${successRate}%\n\n`;
+
+                if (failedMembers > 0) {
+                    successMessage += `ℹ️ *Note:* Some members couldn't be added due to:\n` +
+                        `• Invalid numbers\n` +
+                        `• Not registered on WhatsApp\n` +
+                        `• Privacy settings\n` +
+                        `• Other WhatsApp limitations\n\n`;
+                } else {
+                    successMessage += `🌟 *Perfect! All members added successfully!*\n\n`;
+                }
+
+                successMessage += `Choose your next action:`;
 
                 await bot.editMessageText(successMessage, {
                     chat_id: userId,
@@ -537,7 +610,7 @@ bot.on('text', async (msg) => {
                     parse_mode: 'Markdown',
                     reply_markup: {
                         inline_keyboard: [[
-                            { text: '📱 Buat Grup Baru', callback_data: 'create_group' },
+                            { text: '📱 Create Another Group', callback_data: 'create_group' },
                             { text: '🚪 Logout', callback_data: 'logout' }
                         ]]
                     }
@@ -547,50 +620,60 @@ bot.on('text', async (msg) => {
                 try {
                     const groupLink = await getGroupInviteLink(sock, group.id);
                     await bot.sendMessage(userId, 
-                        `🔗 *Link Grup:*\n${groupLink}\n\n` +
-                        `Anda bisa menggunakan link di atas untuk mengundang member tambahan.`, {
+                        `🔗 *Group Invite Link:*\n${groupLink}\n\n` +
+                        `You can use this link to invite additional members.`, {
                         parse_mode: 'Markdown',
                         disable_web_page_preview: true
                     });
                 } catch (linkError) {
-                    console.error('Error getting group link:', linkError);
+                    console.error('Link generation error:', linkError);
                     await bot.sendMessage(userId, 
-                        '⚠️ *Catatan:* Tidak bisa mengambil link grup secara otomatis.\n' +
-                        'Silakan buat link undangan manual di WhatsApp.', {
+                        '⚠️ *Note:* Could not generate invite link automatically.\n' +
+                        'Please create an invite link manually in WhatsApp.', {
                         parse_mode: 'Markdown'
                     });
                 }
 
-                // Clear states
+                // Clean up
                 userStates.delete(userId);
-                sessions.delete(userId + '_contacts');
+                tempData.delete(userId);
                 
             } catch (metadataError) {
-                console.error('Error getting group metadata:', metadataError);
-                throw new Error('Gagal mendapatkan informasi grup');
+                console.error('Metadata error:', metadataError);
+                throw new Error('Failed to get group information');
             }
         } else {
-            throw new Error('Pembuatan grup gagal');
+            throw new Error('Group creation failed');
         }
         
     } catch (error) {
         console.error('Group creation error:', error);
         await bot.sendMessage(userId, 
-            '❌ *Gagal Membuat Grup*\n\n' +
-            'Gagal membuat grup WhatsApp.\n' +
-            'Silakan coba lagi atau hubungi support.\n\n' +
-            'Masalah umum:\n' +
-            '• Masalah koneksi internet\n' +
-            '• Masalah server WhatsApp\n' +
-            '• Nomor kontak tidak valid\n\n' +
-            'Pilih opsi:', {
+            '❌ *Group Creation Failed*\n\n' +
+            'Failed to create WhatsApp group.\n' +
+            'Please try again or contact support.\n\n' +
+            'Common issues:\n' +
+            '• Internet connection problems\n' +
+            '• WhatsApp server issues\n' +
+            '• Invalid contact numbers\n\n' +
+            'Choose an option:', {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '🔄 Coba Lagi', callback_data: 'create_group' },
+                    { text: '🔄 Try Again', callback_data: 'create_group' },
                     { text: '🚪 Logout', callback_data: 'logout' }
                 ]]
             }
         });
     }
 });
+
+// Initialize the bot
+(async () => {
+    try {
+        await initSession();
+        console.log('Bot started successfully');
+    } catch (error) {
+        console.error('Bot initialization error:', error);
+    }
+})();
