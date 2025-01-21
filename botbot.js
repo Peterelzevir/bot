@@ -257,31 +257,96 @@ function parseVCF(content) {
     return Array.from(contacts);
 }
 
-// Improved group creation with retries
+// Improved group creation with better connection handling
 async function createGroup(sock, name, participants, maxRetries = 3) {
-    let lastError;
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            const group = await sock.groupCreate(name, participants);
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Check connection before attempting
+            if (!sock.user || !sock.user.id) {
+                throw new Error('No WhatsApp connection');
+            }
+
+            // Add delay before creation
+            await delay(2000 * (attempt + 1));
+
+            // Verify connection state
+            const connectionState = await sock.connectionState;
+            if (connectionState !== 'open') {
+                throw new Error('Connection not ready');
+            }
+
+            // Split participants if more than 20
+            const maxParticipantsPerBatch = 20;
+            const participantBatches = [];
             
-            // Verify group creation
+            for (let i = 0; i < participants.length; i += maxParticipantsPerBatch) {
+                participantBatches.push(participants.slice(i, i + maxParticipantsPerBatch));
+            }
+
+            // Create group with first batch
+            const group = await sock.groupCreate(name, participantBatches[0], {
+                timeout: 60000 // 60 seconds timeout
+            });
+
+            if (!group || !group.id) {
+                throw new Error('Group creation failed');
+            }
+
+            // Wait for group to be properly created
+            await delay(3000);
+
+            // Add remaining participants in batches
+            if (participantBatches.length > 1) {
+                for (let i = 1; i < participantBatches.length; i++) {
+                    try {
+                        await sock.groupParticipantsUpdate(
+                            group.id,
+                            participantBatches[i].map(p => p.id),
+                            "add"
+                        );
+                        await delay(2000); // Wait between batches
+                    } catch (batchError) {
+                        console.error(`Batch ${i + 1} add error:`, batchError);
+                        continue; // Continue with next batch if one fails
+                    }
+                }
+            }
+
+            // Verify group exists
             const metadata = await sock.groupMetadata(group.id);
-            if (!metadata) throw new Error('Failed to verify group creation');
-            
+            if (!metadata) {
+                throw new Error('Failed to verify group creation');
+            }
+
             return group;
+
         } catch (error) {
             console.error(`Group creation attempt ${attempt + 1} failed:`, error);
-            lastError = error;
+
+            // Handle specific errors
+            if (error.output?.statusCode === 408 || error.message.includes('Timed Out')) {
+                await delay(5000 * (attempt + 1)); // Increased delay for timeout
+            }
             
-            if (attempt < maxRetries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
+            if (error.message.includes('Connection Closed') || error.message.includes('Connection not ready')) {
+                // Try to recover connection
+                await delay(3000);
+                try {
+                    await sock.connect();
+                    await delay(2000);
+                } catch (connectError) {
+                    console.error('Reconnection failed:', connectError);
+                }
+            }
+
+            // Throw on last attempt
+            if (attempt === maxRetries - 1) {
+                throw error;
             }
         }
     }
-    
-    throw lastError || new Error('Failed to create group after maximum retries');
 }
 
 // Command handlers
@@ -570,7 +635,7 @@ bot.on('document', async (msg) => {
     }
 });
 
-// Group name handler
+// Enhanced group creation handler
 bot.on('text', async (msg) => {
     const userId = msg.from.id;
     if (!await checkAuth(userId, msg)) return;
@@ -579,7 +644,29 @@ bot.on('text', async (msg) => {
     if (state !== 'waiting_group_name') return;
     
     const sock = sessions.get(userId);
+    if (!sock) {
+        await bot.sendMessage(userId, '❌ WhatsApp connection lost.\n\nPlease reconnect:', {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: '🔄 Reconnect', callback_data: 'connect' }
+                ]]
+            }
+        });
+        return;
+    }
+
     const contacts = tempData.get(userId);
+    if (!contacts || !Array.isArray(contacts) || contacts.length === 0) {
+        await bot.sendMessage(userId, '❌ Contact data not found.\n\nPlease start over:', {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: '📱 Create Group', callback_data: 'create_group' }
+                ]]
+            }
+        });
+        return;
+    }
+
     const groupName = msg.text.trim();
     
     if (!groupName || groupName.length > 25) {
@@ -593,29 +680,34 @@ bot.on('text', async (msg) => {
     try {
         const statusMsg = await bot.sendMessage(userId, 
             '⏳ *Creating WhatsApp Group*\n\n' +
-            '• Preparing contacts...\n' +
-            '• Creating group...\n' +
-            '• Adding members...\n\n' +
+            '• Checking connection...\n' +
+            '• Preparing participants...\n' +
+            '• Creating group...\n\n' +
             'Please wait...', {
             parse_mode: 'Markdown'
         });
 
-        // Format participants properly and remove duplicates
-        const uniqueContacts = [...new Set(contacts)];
-        const validParticipants = uniqueContacts.map(id => ({
-            id: id.includes('@s.whatsapp.net') ? id : `${id}@s.whatsapp.net`
-        }));
+        // Format and validate participants
+        const validParticipants = contacts
+            .filter(id => id && typeof id === 'string' && id.includes('@s.whatsapp.net'))
+            .map(id => ({
+                id: id,
+                admin: false // Set all participants as regular members
+            }));
 
-        // Create group with enhanced error handling
+        if (validParticipants.length === 0) {
+            throw new Error('No valid participants found');
+        }
+
+        // Create group with improved error handling
         const group = await createGroup(sock, groupName, validParticipants);
 
         if (group && group.id) {
-            // Wait for group creation to complete
             await new Promise(resolve => setTimeout(resolve, 2000));
             
             try {
                 const groupInfo = await sock.groupMetadata(group.id);
-                const successfulMembers = groupInfo.participants.length;
+                const successfulMembers = groupInfo.participants.length - 1; // Subtract 1 for the bot
                 const failedMembers = contacts.length - successfulMembers;
                 const successRate = ((successfulMembers / contacts.length) * 100).toFixed(1);
                 
@@ -639,12 +731,22 @@ bot.on('text', async (msg) => {
                     successMessage += `🌟 *Perfect! All members added successfully!*\n\n`;
                 }
 
+                // Try to get group link
+                try {
+                    const link = await getGroupInviteLink(sock, group.id);
+                    successMessage += `🔗 *Invite Link:*\n${link}\n\n`;
+                } catch (linkError) {
+                    console.error('Link generation error:', linkError);
+                    successMessage += `⚠️ Unable to generate invite link. Please create manually.\n\n`;
+                }
+
                 successMessage += `Choose your next action:`;
 
                 await bot.editMessageText(successMessage, {
                     chat_id: userId,
                     message_id: statusMsg.message_id,
                     parse_mode: 'Markdown',
+                    disable_web_page_preview: true,
                     reply_markup: {
                         inline_keyboard: [[
                             { text: '📱 Create Another Group', callback_data: 'create_group' },
@@ -652,24 +754,6 @@ bot.on('text', async (msg) => {
                         ]]
                     }
                 });
-
-                // Get and send group link
-                try {
-                    const groupLink = await getGroupInviteLink(sock, group.id);
-                    await bot.sendMessage(userId, 
-                        `🔗 *Group Invite Link:*\n${groupLink}\n\n` +
-                        `You can use this link to invite additional members.`, {
-                        parse_mode: 'Markdown',
-                        disable_web_page_preview: true
-                    });
-                } catch (linkError) {
-                    console.error('Link generation error:', linkError);
-                    await bot.sendMessage(userId, 
-                        '⚠️ *Note:* Could not generate invite link automatically.\n' +
-                        'Please create an invite link manually in WhatsApp.', {
-                        parse_mode: 'Markdown'
-                    });
-                }
 
                 // Clean up
                 userStates.delete(userId);
@@ -687,18 +771,17 @@ bot.on('text', async (msg) => {
         console.error('Group creation error:', error);
         await bot.sendMessage(userId, 
             '❌ *Group Creation Failed*\n\n' +
-            'Failed to create WhatsApp group.\n' +
-            'Please try again or contact support.\n\n' +
-            'Common issues:\n' +
-            '• Internet connection problems\n' +
-            '• WhatsApp server issues\n' +
-            '• Invalid contact numbers\n\n' +
+            `Error: ${error.message}\n\n` +
+            'Please verify:\n' +
+            '• WhatsApp connection is stable\n' +
+            '• All numbers are valid\n' +
+            '• You have permission to add members\n\n' +
             'Choose an option:', {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [[
                     { text: '🔄 Try Again', callback_data: 'create_group' },
-                    { text: '🚪 Logout', callback_data: 'logout' }
+                    { text: '🔄 Reconnect', callback_data: 'connect' }
                 ]]
             }
         });
