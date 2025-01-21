@@ -5,10 +5,13 @@ const bot = new Telegraf('6463537586:AAGq0EdaBaYu-nqxt1INeQrUK0SBi8zDWAk');
 
 // ID Admin dan Grup
 const ADMIN_IDS = [5988451717]; // Ganti dengan ID admin
-const GROUP_ID = -1001234567890; // Ganti dengan ID grup admin (opsional)
+const GROUP_ID = -4735529573; // Ganti dengan ID grup admin (opsional)
 
 // Mode bot (grup/private)
 let BOT_MODE = 'private'; // default mode private
+
+// Menyimpan referensi message_id dengan user_id
+const messageRefs = new Map();
 
 // Command untuk mengatur mode bot (hanya admin)
 bot.command('setmode', async (ctx) => {
@@ -112,9 +115,9 @@ bot.command('help', async (ctx) => {
 
 // Handle command /start
 bot.command('start', async (ctx) => {
-    const welcomeMessage = `*🌟 Selamat Datang di Support Bot!*
+    const welcomeMessage = `*🌟 welcome bot by @hiyaok !*
 
-_Bot ini akan membantu menghubungkan Anda dengan @hiyaok_
+_bot ini akan membantu menghubungkan anda dengan admin @hiyaok_
 
 *Fitur Utama:*
 \`• Support semua jenis media
@@ -122,9 +125,10 @@ _Bot ini akan membantu menghubungkan Anda dengan @hiyaok_
 • Respon cepat & handal
 • Mode Grup & Private Chat\`
 
-> Silakan kirim pesan Anda, @hiyaok akan segera merespon!
+```note bang
+silakan kirim pesan kamu, @hiyaok akan segera merespon!```
 
-💫 Support by @hiyaok`;
+_💫 Support by @hiyaok_`;
 
     await ctx.replyWithMarkdown(welcomeMessage);
 });
@@ -140,6 +144,7 @@ bot.command('stats', async (ctx) => {
 *Mode:* ${BOT_MODE}
 *Admin:* ${ADMIN_IDS.length} orang
 *Status:* Active ✅
+*Pesan Tertunda:* ${messageRefs.size}
 
 _Powered by @hiyaok_`;
 
@@ -157,19 +162,15 @@ bot.on(['message', 'photo', 'video', 'document', 'audio', 'voice', 'video_note',
     // Handle admin reply
     if (isAdmin && ctx.message.reply_to_message) {
         try {
-            const originalMessage = ctx.message.reply_to_message;
-            // Cek apakah ada forwarded_from info
-            if (!originalMessage.forward_from && !originalMessage.forward_sender_name) {
-                return ctx.reply('❌ Tidak dapat menemukan pengirim asli pesan ini');
-            }
+            const repliedToMsgId = ctx.message.reply_to_message.message_id;
+            const targetUserId = messageRefs.get(repliedToMsgId);
 
-            const targetId = originalMessage.forward_from ? originalMessage.forward_from.id : null;
-            if (!targetId) {
-                return ctx.reply('⚠️ User memiliki privacy forward message, tidak dapat mengirim balasan');
+            if (!targetUserId) {
+                return ctx.reply('❌ Tidak dapat menemukan referensi pesan ini');
             }
 
             // Forward balasan admin ke user
-            await forwardAdminReply(ctx, targetId);
+            await forwardAdminReply(ctx, targetUserId);
             await ctx.reply('✅ Pesan terkirim ke user!', { reply_to_message_id: ctx.message.message_id });
             return;
         } catch (error) {
@@ -192,15 +193,23 @@ bot.on(['message', 'photo', 'video', 'document', 'audio', 'voice', 'video_note',
         try {
             // Kirim info user
             const destination = BOT_MODE === 'group' ? GROUP_ID : ADMIN_IDS[0];
-            await bot.telegram.sendMessage(destination, userInfo, { parse_mode: 'Markdown' });
+            const infoMsg = await bot.telegram.sendMessage(destination, userInfo, { parse_mode: 'Markdown' });
             
-            // Forward pesan user
-            await forwardToAdmin(ctx, destination);
+            // Forward pesan user dan simpan referensi
+            const forwardedMsg = await forwardToAdmin(ctx, destination);
+            if (forwardedMsg) {
+                messageRefs.set(forwardedMsg.message_id, userId);
+                
+                // Hapus referensi setelah 24 jam
+                setTimeout(() => {
+                    messageRefs.delete(forwardedMsg.message_id);
+                }, 24 * 60 * 60 * 1000);
+            }
             
             // Kirim konfirmasi ke user
-            const replyMsg = `✅ *Pesan Anda telah diteruskan ke admin!*
+            const replyMsg = `✅ *Pesan anda telah diteruskan!*
             
-_Mohon tunggu balasan dari admin kami._
+_mohon tunggu balasan dari @hiyaok_
 
 ⏰ Waktu terkirim: ${timestamp}`;
             
@@ -215,7 +224,7 @@ _Mohon tunggu balasan dari admin kami._
 // Function untuk forward pesan ke admin
 async function forwardToAdmin(ctx, destination) {
     try {
-        await ctx.forwardMessage(destination);
+        return await ctx.forwardMessage(destination);
     } catch (error) {
         console.error('Error forwarding to admin:', error);
         throw error;
@@ -229,37 +238,27 @@ async function forwardAdminReply(ctx, userId) {
         
         // Handle berbagai jenis media
         if (message.text) {
-            await bot.telegram.sendMessage(userId, message.text, {
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
-            });
+            await bot.telegram.sendMessage(userId, message.text);
         } else if (message.photo) {
             await bot.telegram.sendPhoto(userId, message.photo[0].file_id, {
-                caption: message.caption,
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
+                caption: message.caption
             });
         } else if (message.video) {
             await bot.telegram.sendVideo(userId, message.video.file_id, {
-                caption: message.caption,
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
+                caption: message.caption
             });
         } else if (message.document) {
             await bot.telegram.sendDocument(userId, message.document.file_id, {
-                caption: message.caption,
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
+                caption: message.caption
             });
         } else if (message.voice) {
             await bot.telegram.sendVoice(userId, message.voice.file_id, {
-                caption: message.caption,
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
+                caption: message.caption
             });
         } else if (message.video_note) {
-            await bot.telegram.sendVideoNote(userId, message.video_note.file_id, {
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
-            });
+            await bot.telegram.sendVideoNote(userId, message.video_note.file_id);
         } else if (message.sticker) {
-            await bot.telegram.sendSticker(userId, message.sticker.file_id, {
-                reply_to_message_id: message.reply_to_message.forward_from_message_id
-            });
+            await bot.telegram.sendSticker(userId, message.sticker.file_id);
         }
     } catch (error) {
         console.error('Error sending admin reply:', error);
